@@ -39,7 +39,10 @@ static void wait_for_enter_key(void);
 static bool ensure_ble_connection(void);
 static bool connect_to_device(BLEDevice device);
 static void pump_ble_notifications(void);
-static void send_command_over_ble(const char *label, float confidence);
+static void send_command_over_ble(const char *label);
+static bool send_command_payload(const char *command_keyword);
+static void trigger_emergency_stop(void);
+static void poll_emergency_shortcut(void);
 
 void setup()
 {
@@ -75,6 +78,8 @@ void setup()
 
 void loop()
 {
+    poll_emergency_shortcut();
+
     if (!ensure_ble_connection()) {
         delay(kScanRetryDelayMs);
         return;
@@ -243,28 +248,56 @@ static const char *map_label_to_command(const char *label)
     return NULL;
 }
 
-static void send_command_over_ble(const char *label)
+static bool send_command_payload(const char *command_keyword)
 {
     if (!peripheral || !peripheral.connected() || !rxChar) {
         ei_printf("Không thể gửi lệnh vì BLE chưa sẵn sàng.\n");
-        return;
+        return false;
     }
 
+    unsigned long now_ms = millis();
+    char payload[64];
+    snprintf(payload, sizeof(payload), "%s", command_keyword, now_ms);
+
+    if (rxChar.writeValue(payload)) {
+        ei_printf("Đã gửi lệnh qua BLE: %s\n", payload, now_ms);
+        return true;
+    }
+
+    ei_printf("Gửi BLE thất bại!\n");
+    return false;
+}
+
+static void send_command_over_ble(const char *label)
+{
     const char *command = map_label_to_command(label);
     if (!command) {
         ei_printf("Không nhận dạng được lệnh: %s\n", label ? label : "(null)");
         return;
     }
+    send_command_payload(command);
+}
 
-    char payload[64];
-    snprintf(payload, sizeof(payload), "%s", command);
-
-    if (rxChar.writeValue(payload)) {
-        ei_printf("Đã gửi lệnh qua BLE: %s\n", payload);
-    } else {
-        ei_printf("Gửi BLE thất bại!\n");
+static void trigger_emergency_stop(void)
+{
+    Serial.println(">>> KHẨN CẤP: phím SPACE được nhấn, gửi STOP!");
+    if (!send_command_payload("STOP")) {
+        Serial.println("Không thể gửi STOP khẩn cấp (BLE không sẵn sàng).");
     }
 }
+
+static void poll_emergency_shortcut(void)
+{
+    while (Serial.available()) {
+        int next = Serial.peek();
+        if (next < 0 || next != ' ') {
+            break;
+        }
+        Serial.read();
+        trigger_emergency_stop();
+    }
+}
+
 static void wait_for_enter_key(void)
 {
     while (Serial.available()) {
@@ -273,8 +306,13 @@ static void wait_for_enter_key(void)
 
     for (;;) {
         pump_ble_notifications();
+        poll_emergency_shortcut();
         if (Serial.available()) {
             char c = Serial.read();
+            if (c == ' ') {
+                trigger_emergency_stop();
+                continue;
+            }
             if (c == '\n' || c == '\r') {
                 while (Serial.available()) {
                     char next = Serial.peek();
@@ -358,6 +396,7 @@ static bool microphone_inference_record(void)
     inference.buf_count = 0;
     while (inference.buf_ready == 0) {
         pump_ble_notifications();
+        poll_emergency_shortcut();
         delay(10);
     }
     return true;
